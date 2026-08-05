@@ -1,0 +1,704 @@
+"""
+OROBORO CLINICAL SIMULATION PLATFORM
+------------------------------------
+
+Agent-based infectious disease modeling prototype.
+
+Architecture:
+
+Patient Agent
+      |
+State Machine
+      |
+Risk Engine
+      |
+Transmission Model
+      |
+Resource Forecasting
+      |
+Clinical Dashboard
+
+"""
+
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from collections import deque
+import random
+import math
+import time
+
+
+# ============================================================
+# FASTAPI
+# ============================================================
+
+app = FastAPI(
+    title="Oroboro Clinical Simulation Platform"
+)
+
+# Allow the frontend (served from a different origin/port, e.g.
+# http://localhost:8080) to call this API. Without this, the browser
+# blocks the responses even though curl/Postman would see them fine.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================================
+# STATES
+# ============================================================
+
+STATES = [
+
+    "SUSCEPTIBLE",
+    "EXPOSED",
+    "INFECTIOUS",
+    "RECOVERED",
+    "HOSPITALIZED"
+
+]
+
+# Colors used by the Three.js frontend for each state (hex ints)
+STATE_COLORS = {
+
+    "SUSCEPTIBLE": 0x3399ff,   # blue
+    "EXPOSED":     0xffcc00,   # yellow
+    "INFECTIOUS":  0xff3333,   # red
+    "RECOVERED":   0x33ff88,   # green
+    "HOSPITALIZED": 0xdddddd,  # white/grey
+
+}
+
+
+# ============================================================
+# PATIENT AGENT
+# ============================================================
+
+class Patient:
+
+
+    def __init__(self, pid):
+
+        self.id = pid
+
+        self.x = random.random()*100
+        self.y = random.random()*100
+
+        self.state = "SUSCEPTIBLE"
+
+        self.age = random.randint(
+            1,
+            90
+        )
+
+        self.vaccinated = random.choice(
+            [
+                True,
+                False
+            ]
+        )
+
+        self.comorbidities = random.randint(
+            0,
+            3
+        )
+
+        self.memory = []
+
+        self.timer = 0
+
+
+
+    def move(self):
+
+        self.x += random.uniform(
+            -1,
+            1
+        )
+
+        self.y += random.uniform(
+            -1,
+            1
+        )
+
+
+
+    def remember(self,event):
+
+        self.memory.append({
+
+            "time":
+                time.time(),
+
+            "event":
+                event
+
+        })
+
+
+
+# ============================================================
+# RISK MODEL
+# ============================================================
+
+class RiskEngine:
+
+
+    def evaluate(self,patient):
+
+        risk = 0
+
+
+        explanation=[]
+
+
+        if patient.age > 65:
+
+            risk += .30
+
+            explanation.append(
+                "advanced age"
+            )
+
+
+        if patient.comorbidities:
+
+            risk += .25
+
+            explanation.append(
+                "comorbidities"
+            )
+
+
+        if patient.vaccinated:
+
+            risk -= .35
+
+            explanation.append(
+                "vaccine protection"
+            )
+
+
+        risk=max(
+            0,
+            min(
+                risk,
+                1
+            )
+        )
+
+
+        return {
+
+            "risk":
+                round(
+                    risk,
+                    2
+                ),
+
+            "confidence":
+                .82,
+
+            "explanation":
+                explanation
+
+        }
+
+
+
+# ============================================================
+# TRANSMISSION ENGINE
+# ============================================================
+
+class Transmission:
+
+
+    def chance(
+        self,
+        infected,
+        target
+    ):
+
+        distance = math.sqrt(
+
+            (infected.x-target.x)**2
+            +
+            (infected.y-target.y)**2
+
+        )
+
+
+        if distance > 10:
+            return 0
+
+
+        probability = .15
+
+
+        if target.vaccinated:
+
+            probability *= .2
+
+
+        return probability
+
+
+
+# ============================================================
+# RESOURCE MODEL
+# ============================================================
+
+class Resources:
+
+
+    def __init__(self):
+
+        self.hospital_beds = 500
+
+        self.used_beds = 0
+
+
+    def update(self,population):
+
+        self.used_beds=len(
+
+            [
+
+            p for p in population
+
+            if p.state=="HOSPITALIZED"
+
+            ]
+
+        )
+
+
+    def report(self):
+
+        return {
+
+            "beds_total":
+                self.hospital_beds,
+
+            "beds_used":
+                self.used_beds,
+
+            "capacity":
+                round(
+
+                    self.used_beds /
+                    self.hospital_beds,
+
+                    2
+
+                )
+
+        }
+
+
+
+# ============================================================
+# SIMULATION CORE
+# ============================================================
+
+class OroboroEngine:
+
+
+    def __init__(self, size=300):
+
+        self.population=[
+
+            Patient(i)
+
+            for i in range(size)
+
+        ]
+
+        self.risk=RiskEngine()
+
+        self.transmission=Transmission()
+
+        self.resources=Resources()
+
+        # Rolling log of notable events for the researcher readout.
+        # Capped so it never grows unbounded across a long-running sim.
+        self.event_log = deque(maxlen=200)
+
+
+        for p in self.population[:5]:
+
+            p.state="INFECTIOUS"
+
+
+    def log(self, message):
+
+        self.event_log.appendleft({
+
+            "time": round(time.time(), 2),
+
+            "message": message,
+
+        })
+
+
+    def reset(self, size):
+        """Rebuild the population from scratch with a new size.
+        Used by /generate_test_population."""
+
+        self.population = [
+
+            Patient(i)
+
+            for i in range(size)
+
+        ]
+
+        for p in self.population[:max(1, size // 60)]:
+
+            p.state = "INFECTIOUS"
+
+        self.resources = Resources()
+
+        self.event_log.clear()
+
+        self.log(f"Population reset â€” {size} agents generated")
+
+
+
+    def step(self):
+
+
+        for p in self.population:
+
+            p.move()
+
+
+
+        infectious=[
+
+            p for p in self.population
+
+            if p.state=="INFECTIOUS"
+
+        ]
+
+
+        susceptible=[
+
+            p for p in self.population
+
+            if p.state=="SUSCEPTIBLE"
+
+        ]
+
+
+
+        for source in infectious:
+
+            for target in susceptible:
+
+
+                if random.random() < self.transmission.chance(
+                    source,
+                    target
+                ):
+
+
+                    target.state="EXPOSED"
+
+
+                    target.remember(
+                        "exposure"
+                    )
+
+                    self.log(
+                        f"Patient {target.id} exposed by Patient {source.id}"
+                    )
+
+
+
+        for p in self.population:
+
+
+            p.timer+=1
+
+
+            if p.state=="EXPOSED" and p.timer>3:
+
+                p.state="INFECTIOUS"
+
+                self.log(f"Patient {p.id} became infectious")
+
+
+            if p.state=="INFECTIOUS" and p.timer>10:
+
+
+                if random.random()<.05:
+
+                    p.state="HOSPITALIZED"
+
+                    self.log(f"Patient {p.id} hospitalized")
+
+                else:
+
+                    p.state="RECOVERED"
+
+                    self.log(f"Patient {p.id} recovered")
+
+
+
+        self.resources.update(
+            self.population
+        )
+
+
+
+    def telemetry(self):
+
+        states={}
+
+
+        for p in self.population:
+
+            states[p.state]=states.get(
+                p.state,
+                0
+            )+1
+
+
+        return {
+
+            "population":
+                len(self.population),
+
+            "states":
+                states,
+
+            "resources":
+                self.resources.report()
+
+        }
+
+
+    def visual_agents(self):
+        """Positions + colors for the Three.js frontend."""
+
+        return [
+
+            {
+
+                "id": p.id,
+
+                "x": p.x - 50,   # center around origin for the 3D scene
+                "y": p.y - 50,
+
+                "color": STATE_COLORS.get(p.state, 0xffffff),
+
+            }
+
+            for p in self.population
+
+        ]
+
+
+    def events(self, limit=40):
+        """Most recent events for the researcher readout."""
+
+        return list(self.event_log)[:limit]
+
+
+
+engine=OroboroEngine()
+
+
+
+# ============================================================
+# API
+# ============================================================
+
+@app.get(
+    "/telemetry"
+)
+def telemetry():
+
+    engine.step()
+
+    return engine.telemetry()
+
+
+
+@app.get(
+    "/visual_agents"
+)
+def visual_agents():
+
+    return engine.visual_agents()
+
+
+
+@app.get(
+    "/events"
+)
+def events(limit: int = 40):
+
+    return engine.events(limit)
+
+
+
+@app.get(
+    "/generate_test_population"
+)
+def generate_test_population(size: int = 500):
+
+    size = max(10, min(size, 5000))
+
+    engine.reset(size)
+
+    return {
+
+        "population": len(engine.population)
+
+    }
+
+
+
+@app.get(
+    "/patient/{pid}"
+)
+def patient(pid:int):
+
+    p=engine.population[pid]
+
+    return {
+
+        "id":
+            p.id,
+
+        "state":
+            p.state,
+
+        "risk":
+            engine.risk.evaluate(p)
+
+    }
+
+
+
+# ============================================================
+# UI
+# ============================================================
+
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
+def dashboard():
+
+    return """
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<title>
+OROBORO Clinical Simulation
+</title>
+
+
+<style>
+
+body{
+
+background:#050510;
+color:white;
+font-family:Arial;
+
+}
+
+.panel{
+
+border:1px solid #444;
+padding:20px;
+margin:20px;
+
+}
+
+</style>
+
+
+</head>
+
+
+<body>
+
+
+<h1>
+OROBORO Clinical Simulation Platform
+</h1>
+
+
+<div class="panel">
+
+<h2>
+Live Telemetry
+</h2>
+
+<pre id="data">
+Loading...
+</pre>
+
+</div>
+
+
+
+<script>
+
+
+async function update(){
+
+let r =
+await fetch('/telemetry');
+
+let data =
+await r.json();
+
+
+document
+.getElementById("data")
+.innerHTML =
+JSON.stringify(
+data,
+null,
+2
+);
+
+
+}
+
+
+setInterval(
+update,
+1000
+);
+
+
+</script>
+
+
+</body>
+
+</html>
+
+"""
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
