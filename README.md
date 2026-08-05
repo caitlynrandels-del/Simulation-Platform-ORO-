@@ -4,6 +4,7 @@ OROBORO CLINICAL SIMULATION PLATFORM
 An agent-based infectious disease simulation with a live 3D visualization
 and researcher-facing dashboard.
 
+"An open-source, from-scratch agent-based SIR/SEIR simulator built to make disease dynamics visually intuitive."
 
 WHAT'S INCLUDED
 ---------------
